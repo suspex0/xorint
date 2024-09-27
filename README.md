@@ -1,5 +1,5 @@
 # xorint
-Xor integer values at runtime &amp; decrypt at runtime.
+Xor integer values at compiletime &amp; decrypt at runtime.
 
 ## Code example
 ![code](https://github.com/suspex0/xorint/blob/main/code.PNG?raw=true)
