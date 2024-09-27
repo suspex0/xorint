@@ -1,11 +1,13 @@
-#ifndef BLANK_XORINT_HPP
-#define BLANK_XORINT_HPP
-
+// xorint.hpp
 // Developer: suspex0
 // Inspired by: https://github.com/JustasMasiulis/xorstr
 
+#ifndef BLANK_XORINT_HPP
+#define BLANK_XORINT_HPP
+
 #include <cstdint>
-#include <immintrin.h> // For SIMD and AES-NI instructions
+#include <random>
+#include <immintrin.h> // For SIMD instructions
 
 #define xorint(value) ::blank::xor_integer<decltype(value)>(value)  // Direct integer encryption
 #define xorint_(value) xorint(value).crypt_get()  // Decrypt macro
@@ -51,42 +53,22 @@ namespace blank {
 #endif
         }
 
-        // AES-NI encryption using a key (AES 128-bit for simplicity)
-        XORINT_FORCEINLINE __m128i aes_encrypt(__m128i data, __m128i key) noexcept
+        // Generates a random salt
+        XORINT_FORCEINLINE std::uint64_t generate_salt() noexcept
         {
-            data = _mm_xor_si128(data, key);                // Initial round key addition
-            data = _mm_aesenc_si128(data, key);             // AES round
-            data = _mm_aesenc_si128(data, key);             // AES round
-            data = _mm_aesenc_si128(data, key);             // AES round
-            data = _mm_aesenc_si128(data, key);             // AES round
-            data = _mm_aesenc_si128(data, key);             // AES round
-            data = _mm_aesenc_si128(data, key);             // AES round
-            data = _mm_aesenc_si128(data, key);             // AES round
-            data = _mm_aesenclast_si128(data, key);         // Final round (no MixColumns)
-            return data;
-        }
-
-        // AES-NI decryption using a key
-        XORINT_FORCEINLINE __m128i aes_decrypt(__m128i data, __m128i key) noexcept
-        {
-            data = _mm_xor_si128(data, key);                // Initial round key addition
-            data = _mm_aesdec_si128(data, key);             // AES round
-            data = _mm_aesdec_si128(data, key);             // AES round
-            data = _mm_aesdec_si128(data, key);             // AES round
-            data = _mm_aesdec_si128(data, key);             // AES round
-            data = _mm_aesdec_si128(data, key);             // AES round
-            data = _mm_aesdec_si128(data, key);             // AES round
-            data = _mm_aesdec_si128(data, key);             // AES round
-            data = _mm_aesdeclast_si128(data, key);         // Final round (no MixColumns)
-            return data;
+            std::random_device rd;
+            std::mt19937_64 eng(rd());
+            std::uniform_int_distribution<std::uint64_t> distr;
+            return distr(eng);
         }
 
     } // namespace detail
 
-    // xor_integer template class to handle integer encryption using AES-NI
+    // xor_integer template class to handle integer encryption
     template<class T>
     class xor_integer {
-        alignas(16) std::uint64_t _encrypted[2]; // Stores the encrypted integer in an aligned buffer
+        alignas(32) std::uint64_t _encrypted[4]; // Stores the encrypted integer in an aligned buffer
+        std::uint64_t _salt; // Salt for the encryption
 
         // Generates a compile-time key
         constexpr static std::uint64_t key = detail::key8<sizeof(T)>();
@@ -94,35 +76,47 @@ namespace blank {
     public:
         using value_type = T;
 
-        // Constructor that encrypts the integer using AES-NI at runtime
+        // Constructor that XORs the integer with the key and salt at runtime
         XORINT_FORCEINLINE xor_integer(T value) noexcept
         {
-            __m128i aes_key = _mm_set1_epi64x(key);  // Set AES key
-            __m128i data = _mm_set1_epi64x(static_cast<std::uint64_t>(value));
-            __m128i encrypted = detail::aes_encrypt(data, aes_key);
+            // Generate a random salt
+            _salt = detail::generate_salt();
 
-            _mm_store_si128(reinterpret_cast<__m128i*>(_encrypted), encrypted);
+            // Encrypt the value with the key and salt
+            _encrypted[0] = detail::load_from_reg((static_cast<std::uint64_t>(value) ^ key) ^ _salt);
+            _encrypted[1] = _salt; // Store salt in the encrypted array for decryption
         }
 
-        // Decrypts the integer using AES-NI at runtime
+        // Decrypts the integer at runtime using SIMD intrinsics
         XORINT_FORCEINLINE T crypt_get() noexcept
         {
-            __m128i aes_key = _mm_set1_epi64x(key);  // Set AES key
-            __m128i encrypted = _mm_load_si128(reinterpret_cast<const __m128i*>(_encrypted));
-            __m128i decrypted = detail::aes_decrypt(encrypted, aes_key);
+            __m256i encrypted = _mm256_load_si256(reinterpret_cast<const __m256i*>(_encrypted));
+            __m256i salt = _mm256_set1_epi64x(_encrypted[1]); // Load salt from the second part
+            __m256i key_value = _mm256_set1_epi64x(key);  // Set key in all parts of the register
 
-            std::uint64_t result;
-            _mm_storel_epi64(reinterpret_cast<__m128i*>(&result), decrypted);
-            return static_cast<T>(result);
+            // Perform XOR decryption using SIMD
+            __m256i decrypted = _mm256_xor_si256(encrypted, key_value);
+            decrypted = _mm256_xor_si256(decrypted, salt); // XOR with salt
+
+            // Store the decrypted value
+            _mm256_store_si256(reinterpret_cast<__m256i*>(_encrypted), decrypted);
+
+            // Return the first decrypted value as the result
+            return static_cast<T>(_encrypted[0]);
         }
 
-        // Encrypts/decrypts the value again (reversible AES)
+        // Re-applies XOR to encrypt or decrypt the value using SIMD
         XORINT_FORCEINLINE void crypt() noexcept
         {
-            __m128i aes_key = _mm_set1_epi64x(key);  // Set AES key
-            __m128i data = _mm_load_si128(reinterpret_cast<const __m128i*>(_encrypted));
-            __m128i encrypted = detail::aes_encrypt(data, aes_key);
-            _mm_store_si128(reinterpret_cast<__m128i*>(_encrypted), encrypted);
+            __m256i encrypted = _mm256_load_si256(reinterpret_cast<const __m256i*>(_encrypted));
+            __m256i salt = _mm256_set1_epi64x(_encrypted[1]); // Load salt from the second part
+            __m256i key_value = _mm256_set1_epi64x(key);  // Set key in all parts of the register
+
+            // Perform XOR encryption/decryption using SIMD
+            __m256i encrypted_again = _mm256_xor_si256(encrypted, key_value);
+            encrypted_again = _mm256_xor_si256(encrypted_again, salt); // XOR with salt
+
+            _mm256_store_si256(reinterpret_cast<__m256i*>(_encrypted), encrypted_again);
         }
     };
 
